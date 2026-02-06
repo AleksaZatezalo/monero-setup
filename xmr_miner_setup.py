@@ -42,8 +42,8 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 XMRIG_GIT      = "https://github.com/xmrig/xmrig.git"
-XMRIG_VERSION  = "v6.22.2"
-MONERO_VERSION  = "0.18.3.4"
+XMRIG_VERSION  = "v6.25.0"
+MONERO_VERSION  = "0.18.4.5"
 MONERO_URL_TPL  = (
     "https://downloads.getmonero.org/cli/"
     "monero-linux-x64-v{version}.tar.bz2"
@@ -56,7 +56,7 @@ XMRIG_PREFIX    = Path("/opt/xmrig")
 P2POOL_PREFIX   = Path("/opt/p2pool")
 CONFIG_DIR      = Path("/etc/xmrig")
 
-P2POOL_VERSION  = "v4.2"
+P2POOL_VERSION  = "v4.9"
 P2POOL_URL_TPL  = (
     "https://github.com/SChernykh/p2pool/releases/download/"
     "{version}/p2pool-{version}-linux-x64.tar.gz"
@@ -82,6 +82,8 @@ class MinerConfig:
     hugepages: bool        = True
     one_gb_pages: bool     = True
     run_node: bool         = False
+    monerod_path: Optional[str] = None
+    data_dir: Optional[str]     = None
     use_p2pool: bool       = False
     p2pool_mini: bool      = True
     p2pool_prefix: Path    = P2POOL_PREFIX
@@ -511,7 +513,7 @@ def configure_xmrig(cfg: MinerConfig) -> Path:
 
 def start_monerod(cfg: MinerConfig, monerod_bin: str) -> None:
     """Launch monerod in a detached screen session."""
-    data_dir = cfg.install_prefix / "data"
+    data_dir = Path(cfg.data_dir) if cfg.data_dir else cfg.install_prefix / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -527,6 +529,17 @@ def start_monerod(cfg: MinerConfig, monerod_bin: str) -> None:
         "--sync-pruned-blocks",
         "--db-sync-mode", "safe",
     ]
+
+    # P2Pool requires ZMQ pub socket and benefits from more peers
+    if cfg.use_p2pool:
+        cmd += [
+            "--zmq-pub", "tcp://127.0.0.1:18083",
+            "--out-peers", "32",
+            "--in-peers", "64",
+            "--add-priority-node=p2pmd.xmrvsbeast.com:18080",
+            "--add-priority-node=nodes.hashvault.pro:18080",
+            "--enable-dns-blocklist",
+        ]
     run(cmd)
     LOG.info("monerod started in screen session 'monerod'.")
     LOG.info("  Attach: screen -r monerod")
@@ -560,6 +573,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--donate-level", type=int, default=1, help="XMRig dev donation %% (0–100)")
     p.add_argument("--no-hugepages", action="store_true", help="Skip hugepage setup")
     p.add_argument("--no-1gb", action="store_true", help="Skip 1GB hugepage GRUB config")
+    p.add_argument("--monerod-path", default=None, help="Path to existing monerod binary (skip download)")
+    p.add_argument("--data-dir", default=None, help="Path to existing monerod data directory (skip resyncing)")
     p.add_argument("--run-node", action="store_true", help="Also run a pruned monerod node")
     p.add_argument("--p2pool", action="store_true", help="Install and run P2Pool (implies --run-node)")
     p.add_argument("--p2pool-main", action="store_true", help="Use P2Pool main chain instead of mini")
@@ -586,7 +601,9 @@ def main() -> None:
         hugepages=not args.no_hugepages,
         one_gb_pages=not args.no_1gb,
         tls=not args.no_tls,
-        run_node=args.run_node or args.p2pool,  # P2Pool requires a local node
+        run_node=args.run_node or args.p2pool or args.monerod_path or args.data_dir,  # P2Pool and --monerod-path require a local node
+        monerod_path=args.monerod_path,
+        data_dir=args.data_dir,
         use_p2pool=args.p2pool,
         p2pool_mini=not args.p2pool_main,
     )
@@ -601,7 +618,14 @@ def main() -> None:
 
     # Monerod (optional, or required by P2Pool)
     monerod_bin = None
-    if cfg.run_node and not state.monerod_path:
+    if cfg.monerod_path:
+        # Explicit path provided via --monerod-path
+        monerod_bin = cfg.monerod_path
+        if not Path(monerod_bin).exists():
+            LOG.error("monerod not found at %s", monerod_bin)
+            sys.exit(1)
+        LOG.info("Using existing monerod at %s", monerod_bin)
+    elif cfg.run_node and not state.monerod_path:
         monerod_bin = install_monerod(cfg)
     elif state.monerod_path:
         monerod_bin = state.monerod_path
